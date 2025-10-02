@@ -1,9 +1,10 @@
-import subprocess
-import re
+import subprocess, re, json, sys
+from concurrent.futures import ThreadPoolExecutor
 
 HOSTS = ["google.com", "cloudflare.com", "facebook.com"]
 PING_COUNT = 4
-RUN_TRACERT_FOR = "facebook.com"
+RTT_THRESHOLD = 100  # ms
+LOSS_THRESHOLD = 10  # %
 
 def run_cmd(cmd_list):
     result = subprocess.run(cmd_list, capture_output=True, text=True, errors="ignore")
@@ -29,27 +30,49 @@ def tracert_windows(host, max_hops=30, no_dns=True):
         cmd.append("-d")
     cmd += ["-h", str(max_hops), host]
     out = run_cmd(cmd)
-    print("\n=== THEO DÕI ĐƯỜNG DẪN (TRACERT) ===")
-    print(out)
+    return out
 
 def main():
-    summaries = []
-    print("=== CHẠY PING ===")
-    for h in HOSTS:
-        res = ping_windows(h, PING_COUNT)
-        print(f"\n--- {h} ---")
-        print(res["raw"])
-        summaries.append(res)
+    results = []
+    print("=== CHẠY PING SONG SONG ===")
+    with ThreadPoolExecutor() as executor:
+        futures = [executor.submit(ping_windows, h, PING_COUNT) for h in HOSTS]
+        for f in futures:
+            res = f.result()
+            results.append(res)
+            print(f"\n--- {res['host']} ---")
+            print(res["raw"])
 
     print("\n=== TÓM TẮT PING ===")
-    print(f"{'Host':<18} {'Avg(ms)':>8} {'Loss(%)':>8}")
-    print("-" * 36)
-    for r in summaries:
+    print(f"{'Host':<18} {'Avg(ms)':>8} {'Loss(%)':>8} {'Status':>10}")
+    print("-" * 50)
+    problems = []
+    for r in results:
         avg = r['avg_ms'] if r['avg_ms'] is not None else "-"
         loss = r['loss_percent'] if r['loss_percent'] is not None else "-"
-        print(f"{r['host']:<18} {str(avg):>8} {str(loss):>8}")
+        status = "OK"
+        if isinstance(avg, int) and avg > RTT_THRESHOLD:
+            status = "RTT HIGH"
+        if isinstance(loss, int) and loss > LOSS_THRESHOLD:
+            status = "LOSS HIGH"
+        print(f"{r['host']:<18} {str(avg):>8} {str(loss):>8} {status:>10}")
+        if status != "OK":
+            problems.append(r['host'])
 
-    tracert_windows(RUN_TRACERT_FOR)
+    # Diagnostics log
+    with open("net_diag.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    # Auto traceroute nếu có vấn đề
+    if problems:
+        print("\n=== THEO DÕI ĐƯỜNG DẪN (TRACERT) ===")
+        for h in problems:
+            print(f"\nTraceroute to {h}:")
+            print(tracert_windows(h))
+
+    # Exit code cho CI/monitoring
+    if problems:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
